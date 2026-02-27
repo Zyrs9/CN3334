@@ -1,0 +1,30 @@
+# Java class files
+*.class
+out/
+target/
+
+# Received files from server
+received_*
+
+# Served files directory (keep placeholder)
+served_files/*
+!served_files/.gitkeep
+
+# Stress test temp files
+stress_cmds.txt
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

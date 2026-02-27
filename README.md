@@ -1,292 +1,218 @@
-# Java TCP/UDP Load Balancer Demo
+# Networks3334 — Distributed System with Load Balancer
 
-A minimal, production-inspired load balancer with **static round-robin** and **dynamic (RTT-based)** server selection, **multi-instance servers**, **UDP “streaming” side-channel**, **Base64 file transfer**, and a built-in **admin console** to observe and control the cluster live.
-
----
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Features](#features)
-- [Ports & Protocols](#ports--protocols)
-- [Build](#build)
-- [Run](#run)
-  - [Load Balancer](#load-balancer)
-  - [Server (multi-instance)](#server-multi-instance)
-  - [Client](#client)
-- [Admin Console (LB)](#admin-console-lb)
-- [Wire Protocols](#wire-protocols)
-  - [Server ↔ LB](#server--lb)
-  - [Client ↔ LB](#client--lb)
-  - [Client ↔ Server (TCP)](#client--server-tcp)
-  - [Server → Client (UDP)](#server--client-udp)
-- [Scheduling Logic](#scheduling-logic)
-- [Examples](#examples)
-- [Troubleshooting](#troubleshooting)
-- [Security Notes](#security-notes)
-- [Extending](#extending)
+A Java-based distributed system featuring a **TCP/UDP Load Balancer**, multiple servers, clients, and a real-time Swing dashboard (`VisualOversee`).
 
 ---
 
 ## Architecture
 
 ```
-+-----------+        +------------------+        +-------------------------+
-|  Client   | <----> |  Load Balancer   | <----> |  Server (N instances)   |
-| (TCP+UDP) |  TCP   |  (TCP admin,     |  TCP   |  TCP cmd, UDP streaming |
-|           |        |  TCP reg/pings)  |        |  + periodic LB reports  |
-+-----------+        +------------------+        +-------------------------+
-         ^                       ^                             |
-         |  UDP ticks            |                             | UDP
-         +-----------------------+-----------------------------+
-```
-
-- **Client ↔ LB (TCP 11114):** client asks for a backend; LB replies with `host:port`.
-- **Server ↔ LB (TCP 11115):** server registers (`!join`) and periodically reports live clients (`!report`).
-- **Client ↔ Server (TCP):** line-based command protocol (`hello`, `ping`, `sendfile`, `stream`, …).
-- **Server → Client (UDP):** optional periodic “tick” packets; client listens and prints.
-
----
-
-## Features
-
-- **Static RR** with **weights**, **drain**/undrain, **manual removal**.
-- **Dynamic selection** via **background RTT probes** (configurable interval).
-- **Live client visibility** (servers report current sessions to LB).
-- **Access controls:** ban by client name or IP.
-- **Max connections/server** (uses server live reports).
-- **Multi-instance servers** on the same host (ephemeral ports by default).
-- **Responsive streaming cancel** (background thread, immediate `cancel`).
-- **Text-safe file transfer** (Base64 framed).
-
----
-
-## Ports & Protocols
-
-| Component | Purpose                       | Default Port |
-|----------:|-------------------------------|:------------:|
-| LB        | Client handshakes             | **11114/TCP** |
-| LB        | Server register & reports     | **11115/TCP** |
-| Server    | Client commands               | **ephemeral (0)** or custom (e.g., 11112/TCP) |
-| Server    | UDP streaming source          | **ephemeral (0)** or custom (e.g., 11113/UDP) |
-| Client    | UDP listening port            | **ephemeral (auto)** |
-
-> Servers advertise the **actual bound TCP port** to the LB, so you can run many in parallel.
-
----
-
-## Build
-
-Requires **JDK 8+**.
-
-```bash
-javac LoadBalancer.java Server.java Client.java
+┌──────────────────────────────────────────────────────────┐
+│                     VisualOversee                         │
+│  (polls port 11116, sends admin to 11117)                │
+└─────────────────────────┬────────────────────────────────┘
+                          │
+       ┌──────────────────▼───────────────────┐
+       │           LoadBalancer               │
+       │  port 11114 – client queries         │
+       │  port 11115 – server registration   │
+       │  port 11116 – JSON status endpoint  │
+       │  port 11117 – TCP admin/command port │
+       └──────┬───────────────────┬───────────┘
+              │ assigns           │ !join / !report
+     ┌────────▼──┐        ┌──────▼──────┐
+     │  Client A │        │  Server 1   │
+     │  Client B │        │  Server 2   │
+     └────────▲──┘        └──────┬──────┘
+              └──── TCP session ──┘
 ```
 
 ---
 
-## Run
+## Ports
 
-### Load Balancer
+| Port  | Purpose                                 |
+|-------|-----------------------------------------|
+| 11114 | Client → LB: request a server           |
+| 11115 | Server → LB: `!join`, `!leave`, `!report` |
+| 11116 | HTTP/TCP: JSON status (VisualOversee polls here) |
+| 11117 | TCP: admin command port (remote control)|
 
-```bash
+---
+
+## Compile
+
+```powershell
+javac LoadBalancer.java Server.java Client.java VisualOversee.java
+```
+
+---
+
+## Run (manual)
+
+```powershell
+# 1. Load Balancer
 java LoadBalancer
-```
 
-Interactive admin console is available in the same terminal; type `help`.
+# 2. Servers (in separate windows; port 0 = ephemeral)
+java Server -p 0 -u 0 --lb-host localhost
+
+# 3. Dashboard (auto-detects LB on localhost:11116)
+java VisualOversee
+
+# 4. Clients
+java Client --name Alice --mode dynamic
+java Client --name Bob   --mode static
+java Client --name Carol --mode sticky
+```
 
 ---
 
-### Server (multi-instance)
+## Run (parallel script)
 
-Run one or many:
+```powershell
+# Start LB + 3 servers + 2 dynamic clients + 1 static client + dashboard
+.\run_parallel.ps1 -Servers 3 -DynamicClients 2 -StaticClients 1 -Visualise
 
-```bash
-# Ephemeral TCP/UDP ports (recommended for many instances)
-java Server
+# Stress test (while cluster is running)
+.\stress_test.ps1 -Clients 8 -Mode dynamic
 
-# Explicit ports (optional)
-java Server --port 11112 --udp-port 11113 --lb-host localhost --lb-port 11115
-
-# Short flags:
-java Server -p 0 -u 0
+# Stop everything
+.\stop_all.ps1
 ```
 
-Each server registers with the LB using its **real TCP port**.
-
 ---
+
+## Components
+
+### LoadBalancer
+
+| Feature | Detail |
+|---|---|
+| **Static routing** | Weighted Round-Robin (`--mode static`) |
+| **Dynamic routing** | Lowest RTT, live-client tiebreaker (`--mode dynamic`) |
+| **Sticky sessions** | Re-routes client to its last server (`--mode sticky`) |
+| **Server eviction** | Auto-removes servers that stop sending `!report` after `evictionTimeoutMs` (default 15 s) |
+| **Health scores** | Rolling ping success rate (last 10 pings) per server |
+| **Request counters** | Per-server total request count |
+| **Drain/Undrain** | Gracefully shifts traffic away from a server |
+| **IP/name bans** | Block clients by IP or name |
+| **Bounded thread pool** | Max 200 concurrent client handler threads |
+| **Admin console** | Interactive stdin command line |
+| **Command port 11117** | Remote admin — see commands below |
+| **JSON status 11116** | Full cluster state polled by VisualOversee |
+
+### Server
+
+| Flag | Default | Description |
+|---|---|---|
+| `--port / -p` | 0 | TCP port (0 = ephemeral) |
+| `--udp-port / -u` | 0 | UDP port (0 = ephemeral) |
+| `--lb-host` | localhost | Load balancer hostname |
+| `--lb-port` | 11115 | LB registration port |
+| `--max-clients` | 50 | Thread pool size |
+| `--stream-limit` | 0 | Cap UDP ticks (0 = unlimited) |
+
+**Commands** (received from clients):
+`hello <name>`, `udp <port>`, `ping`, `time`, `ls`, `pwd`, `stream`, `cancel`, `sendfile <name>`, `compute <seconds>`, `quit`
+
+**Persistence:** A background thread re-sends `!join` to the LB every 5–10 s, so the server automatically re-registers if the LB restarts.
 
 ### Client
 
-```bash
-# Static or dynamic selection; name is optional
-java Client --mode dynamic --name Alice
-java Client -m static -n Bob
-```
+| Flag | Default | Description |
+|---|---|---|
+| `--name / -n` | auto-generated | Client identifier |
+| `--mode / -m` | static | `static`, `dynamic`, or `sticky` |
+| `--lb-host` | localhost | LB hostname |
+| `--lb-port` | 11114 | LB client port |
+| `--script` | — | Path to a text file of commands to send |
 
-Interactive commands after connected (type into client’s stdin):
+**Auto-reconnect:** if the assigned server drops, the client automatically re-queries the LB and reconnects.
 
-```
-hello Alice
-udp 54321                # auto-sent by client using its UDP socket; you can resend
-stream                   # start UDP ticks
-cancel                   # stop streaming (immediate)
-ping | time | ls | pwd   # utility commands
-sendfile README.md       # Base64 framed transfer
-compute 3                # sleep 3s to simulate work
+**Script mode:**
+```text
+# comment lines are ignored
+ping
+compute 2
+sendfile data.txt
 quit
 ```
 
 ---
 
-## Admin Console (LB)
+## VisualOversee Dashboard
 
-Type these in the **LB terminal**:
+Launch: `java VisualOversee [lb-host] [status-port] [command-port] [project-dir]`
 
-- **Cluster views**
-  - `servers` — list servers with RTT, weight, drain flag, live client count
-  - `live` — live clients per server (reported)
-  - `clients` / `recent` — LB’s recent assignment history
-  - `status` — `servers` + `live`
-- **Capacity / policy**
-  - `set ping <ms>` — RTT probe interval (default 1000ms)
-  - `set maxconn <N>` — cap live clients per server
-  - `mode default <static|dynamic>` — default when client omits mode
-- **Weights & draining**
-  - `setweight <host:port> <N>` — weighted RR
-  - `weights` — show weights
-  - `drain <host:port|all>` / `undrain <host:port|all>` / `drained`
-- **Access control**
-  - `ban ip <x>` / `unban ip <x>`
-  - `ban name <x>` / `unban name <x>`
-  - `bans`
-- **Maintenance**
-  - `remove <host:port>` — unregister
-  - `clear` — clear assignment history
-  - `help`
+| Panel | Description |
+|---|---|
+| **Status bar** | Uptime, mode, ping interval, max-conn, ban count, eviction timeout; refresh-rate slider |
+| **⚙ Servers table** | RTT bar, health score %, total request count, live count, drain status — red alert when RTT ≥ 200 ms or health < 50% |
+| ** RTT History** | Rolling 60-sample sparkline per server |
+| ** Server Timeline** | Gantt chart of the last 5 minutes — green = active, orange bar + red end = evicted |
+| ** Live Clients** | Real-time clients per server (reported via `!report`) |
+| ** Assignments** | Last 20 LB assignments, colour-coded DYN/STA/STK |
+| ** Admin** | Type and send admin commands to port 11117; view response |
+| ** Process Control** | Start/stop Server & Client processes directly from the dashboard; live output log |
 
-> **Note:** “live” lists are **actual connected clients** (reported by servers), while “recent” shows whom the LB **directed** to which server.
+### Starting processes from the dashboard
+
+In the **Process Control** tab:
+- **＋ Server** — spawns `java Server -p 0 -u 0 --lb-host <lb>` in the project directory
+- **＋ Dynamic / Static / Sticky** — spawns a `java Client` with the chosen mode
+- **✕ Stop** — terminates the selected process
+- **✕ Stop All** — terminates all spawned processes
+
+The live output of every spawned process is streamed into the log area.
 
 ---
 
-## Wire Protocols
+## Admin Commands
 
-### Server ↔ LB
+Send via the Admin panel in VisualOversee, or via `nc localhost 11117`:
 
-- **Register:**  
-  `!join -v dynamic <tcpPort>` → LB replies `!ack`
-
-- **Report (every ~2s):**  
-  `!report <tcpPort> clients <N> <name>@<ip> ...`  
-  LB updates its live view and uses it for `maxconn` and console.
-
-### Client ↔ LB
-
-- **Handshake:**  
-  `HELLO <name> <mode>` where `<mode>` ∈ `{static,dynamic}`  
-  (name optional; LB will assign `Client-<id>` if missing)
-
-- **Reply:**  
-  `<serverHost>:<serverPort>` or `NO_SERVER_AVAILABLE`
-
-### Client ↔ Server (TCP)
-
-Line-based commands:
-
-- `hello <name>` → `Hello, <name>!`
-- `udp <port>` — register client’s UDP port for streaming
-- `stream` / `cancel`
-- `ping` → `pong`
-- `time` → server time
-- `ls`, `pwd`
-- `compute <seconds>`
-- `sendfile [-v] <filename>` — **framed, Base64**
-  - Header: `FILE <name> <sizeBytes>`
-  - Content: multiple Base64 lines
-  - Terminator: `ENDFILE`
-- `quit`
-
-### Server → Client (UDP)
-
-- Payload: simple UTF-8 `"tick <millis>"` every ~2s while streaming.
-
----
-
-## Scheduling Logic
-
-1. **Candidate set** = registered servers **minus** any **drained** servers and any server at or above **maxconn** (uses live reports).
-2. **Dynamic mode:** pick the **lowest RTT** among candidates (background cache).
-3. **Static mode:** **weighted** round-robin across candidates using `setweight`.
-4. If dynamic yields none (no RTT yet), fallback to static.
-
----
-
-## Examples
-
-**Start cluster**
-```bash
-# Terminal 1 (LB)
-java LoadBalancer
-
-# Terminal 2..N (multiple servers)
-java Server
-java Server
-java Server -p 0 -u 0
 ```
-
-**Connect clients**
-```bash
-java Client -n Alice -m dynamic
-java Client -n Bob   -m static
-```
-
-**In the LB console**
-```
-servers
-live
-set maxconn 1
-status
-drain 127.0.0.1:12345
-setweight 127.0.0.1:23456 5
-ban name Alice
-bans
+servers                   – list registered servers (RTT, weight, live count)
+live                      – show live clients per server
+status                    – servers + live
+recent                    – last 50 assignments
+weights                   – show server weights
+drained                   – list drained servers
+drain <host:port|all>     – mark unschedulable
+undrain <host:port|all>   – restore scheduling
+setweight <host:port> <N> – update weight
+mode default <static|dynamic>
+set ping <ms>             – ping interval
+set maxconn <N>           – max live clients per server
+set evict <ms>            – server eviction timeout
+ban ip <addr>             – ban client IP
+ban name <name>           – ban client by name
+unban ip/name <x>
+bans                      – list all bans
+remove <host:port>        – force-remove a server
+clear                     – clear assignment history
+help
 ```
 
 ---
 
-## Troubleshooting
+## File Transfer (sendfile)
 
-- **Server logs “Accepted connection …” too often**  
-  That’s the LB’s RTT pinger. It connects briefly and sends `ping`; servers reply `pong` without verbose logging. This is expected.
+Place files in the `served_files/` directory on the server machine, then:
 
-- **`cancel` isn’t immediate**  
-  Streaming runs in a **background thread** and checks a `volatile` flag; `cancel` interrupts the thread. If you customized the code and call `stream` on the **same reader thread**, move it back to a background thread.
+```
+sendfile myfile.txt
+```
 
-- **No UDP ticks on client**  
-  Ensure the client **sent** `udp <port>` (the provided client auto-registers its UDP port). Firewalls may need UDP allowances.
-
-- **Multiple servers on same host**  
-  Use **ephemeral** ports (`-p 0 -u 0`) or unique explicit ports. Each server registers its **real TCP port**.
-
-- **File transfer dumps gibberish in console**  
-  The protocol is **framed & Base64** to stay line-safe. The client saves received data to `received_<name>` and logs bytes.
+The server streams the file as Base64 lines; the client writes it as `received_myfile.txt` in the working directory.
 
 ---
 
-## Security Notes
+## Tooling Scripts
 
-- **No auth**: anyone can register a server or request routing; use **bans**, **drain**, and run on a **trusted network** only.
-- **File serving is local-filesystem** access on the server process; sandbox accordingly.
-- **No TLS**: use stunnel/SSH tunnel or embed TLS if used beyond a lab.
-
----
-
-## Extending
-
-- **Heartbeats & eviction**: prune servers missing reports for N intervals.
-- **Health checks**: track success/failure rates per server.
-- **Sticky sessions**: consistent hashing by client name/IP.
-- **Graceful drain**: server rejects new connections but keeps existing until idle.
-- **JSON admin API**: expose read-only views and actions over HTTP.
-
----
+| Script | Usage |
+|---|---|
+| `run_parallel.ps1` | `-Servers N -DynamicClients N -StaticClients N [-Visualise]` |
+| `stress_test.ps1` | `-Clients N -Iterations N -Mode dynamic` |
+| `stop_all.ps1` | `[-Force]` — kills all cluster Java processes |
