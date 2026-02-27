@@ -1,4 +1,4 @@
-# Networks3334 — Distributed System with Load Balancer
+# CN3334 — Distributed System with Load Balancer
 
 A Java-based distributed system featuring a **TCP/UDP Load Balancer**, multiple servers, clients, and a real-time Swing dashboard (`VisualOversee`).
 
@@ -216,3 +216,4 @@ The server streams the file as Base64 lines; the client writes it as `received_m
 | `run_parallel.ps1` | `-Servers N -DynamicClients N -StaticClients N [-Visualise]` |
 | `stress_test.ps1` | `-Clients N -Iterations N -Mode dynamic` |
 | `stop_all.ps1` | `[-Force]` — kills all cluster Java processes |
+
